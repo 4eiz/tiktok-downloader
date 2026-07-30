@@ -61,7 +61,8 @@ Get a Telegram bot token from [@BotFather](https://t.me/botfather), then send `b
 - Instagram Stories/Carousels with automatic fallback
 - Access control via allowlist (by username or chat ID)
 - Error reporting to admin chats
-- Multi-language support (Ukrainian, English)
+- Multi-language support (Russian, Ukrainian, English)
+- Persistent white list managed directly from Telegram by the administrator
 - Optional AI chat (Grok or Google Gemini)
 - Conversation context prompt history per user for AI
 
@@ -88,7 +89,7 @@ Get a Telegram bot token from [@BotFather](https://t.me/botfather), then send `b
   <summary>Click to expand</summary>
 
 **Optional - Basic:**
-- `LANGUAGE` - `en` or `uk` (default: uk)
+- `LANGUAGE` - `ru`, `en` or `uk` (default: uk)
 - `LOG_LEVEL` - DEBUG, INFO, WARNING, ERROR (default: INFO)
 
 **Optional - Video Processing:**
@@ -97,9 +98,10 @@ Get a Telegram bot token from [@BotFather](https://t.me/botfather), then send `b
 - `INSTACOOKIES` - Use Instagram cookies file (default: false)
 
 **Optional - Access Control:**
-- `LIMIT_BOT_ACCESS` - Restrict to allowlist (default: false)
+- `LIMIT_BOT_ACCESS` - Restrict to allowlist (default: true)
 - `ALLOWED_USERNAMES` - Comma-separated usernames
 - `ALLOWED_CHAT_IDS` - Comma-separated chat IDs
+- `ADMIN_IDS` - Comma-separated administrator IDs. The owner ID `660502874` is always an administrator.
 
 **Optional - Error Reporting:**
 - `SEND_ERROR_TO_ADMIN` - Forward errors to admin (default: false)
@@ -129,8 +131,9 @@ Get a Telegram bot token from [@BotFather](https://t.me/botfather), then send `b
 
 ```ini
 BOT_TOKEN=123456789:ABCDEFghijklmnopqrstuvwxyz
-LANGUAGE=en
-LIMIT_BOT_ACCESS=false
+LANGUAGE=ru
+LIMIT_BOT_ACCESS=true
+ADMIN_IDS=660502874
 ALLOWED_USERNAMES=
 ALLOWED_CHAT_IDS=
 H_CODEC=libx265
@@ -311,6 +314,16 @@ ALLOWED_CHAT_IDS=12345,67890
 ```
 
 To get your IDs, send `bot_health` to the bot.
+
+### Управление белым списком
+
+Пользователь может узнать свой ID командой `/myid`. Администратор (ID `660502874`) добавляет его одной командой:
+
+```
+/adduser 123456789
+```
+
+Список сохраняется в базе SQLite и не пропадает после перезапуска. Также доступны `/removeuser 123456789` и `/whitelist`.
 
 ## Error Reporting
 

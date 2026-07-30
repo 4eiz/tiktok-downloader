@@ -8,12 +8,30 @@ from typing import Optional
 from telegram import Update
 
 allowed_usernames = [x.strip() for x in os.getenv("ALLOWED_USERNAMES", "").split(",") if x]
-allowed_chat_ids = [int(x) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if x]
-limit_bot_access = os.getenv("LIMIT_BOT_ACCESS", "False")
+allowed_chat_ids = [int(x.strip()) for x in os.getenv("ALLOWED_CHAT_IDS", "").split(",") if x.strip()]
+limit_bot_access = os.getenv("LIMIT_BOT_ACCESS", "True").lower() == "true"
+
+
+def _read_ids(variable: str, default: str = "") -> set[int]:
+    """Read a comma-separated list of Telegram IDs without failing on bad input."""
+    ids = set()
+    for value in os.getenv(variable, default).split(","):
+        try:
+            if value.strip():
+                ids.add(int(value.strip()))
+        except ValueError:
+            continue
+    return ids
+
+
+# The project owner is always an administrator. ADMIN_IDS may add further admins.
+admin_ids = _read_ids("ADMIN_IDS", "660502874")
 
 
 # Check if user or chat is not allowed. Returns True if not allowed, False if allowed
-def is_user_or_chat_not_allowed(username: Optional[str], chat_id: int) -> bool:
+def is_user_or_chat_not_allowed(
+    username: Optional[str], chat_id: int, user_id: Optional[int] = None, dynamic_access: bool = False
+) -> bool:
     """Check if username or chat_id is not in the allowed lists.
 
     Args:
@@ -24,7 +42,11 @@ def is_user_or_chat_not_allowed(username: Optional[str], chat_id: int) -> bool:
         True if neither user nor chat is allowed, False if either is allowed
     """
     # default case when no limits are set
-    if limit_bot_access == "False":
+    if not limit_bot_access:
+        return False
+
+    # Administrators and IDs added from the in-bot allowlist always have access.
+    if user_id in admin_ids or dynamic_access:
         return False
 
     # If chat_id is allowed, grant access regardless of username
@@ -33,6 +55,11 @@ def is_user_or_chat_not_allowed(username: Optional[str], chat_id: int) -> bool:
 
     # Otherwise check if username is allowed
     return username not in allowed_usernames
+
+
+def is_admin(user_id: Optional[int]) -> bool:
+    """Return whether the Telegram user may manage the access list."""
+    return user_id in admin_ids
 
 
 # Function to inform the user they are not allowed to use the bot
@@ -51,9 +78,11 @@ async def inform_user_not_allowed(update: Update) -> None:
     """
     if update.effective_chat.type == "private":
         await update.message.reply_text(
-            f"You are not allowed to use this bot.\n "
-            f"[Username]:  {update.effective_user.username}\n "
-            f"[Chat ID]: {update.effective_chat.id}",
+            "🔒 <b>Доступ пока не открыт</b>\n\n"
+            "Отправьте администратору эту команду — он добавит вас в белый список:\n"
+            f"<code>/adduser {update.effective_user.id}</code>\n\n"
+            f"Ваш ID: <code>{update.effective_user.id}</code>",
+            parse_mode="HTML",
             reply_to_message_id=update.message.message_id,
         )
 

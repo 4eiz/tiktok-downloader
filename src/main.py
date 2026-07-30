@@ -22,12 +22,12 @@ from collections import defaultdict
 from dotenv import load_dotenv
 from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.error import TimedOut, NetworkError, TelegramError
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import MessageEntityType
 from telegram.request import HTTPXRequest
 from logger import error, info, debug
 from general_error_handler import error_handler
-from permissions import inform_user_not_allowed, is_user_or_chat_not_allowed, supported_sites
+from permissions import inform_user_not_allowed, is_admin, is_user_or_chat_not_allowed, supported_sites
 from cleanup import cleanup
 from db_storage import BotStorage
 from video_utils import (
@@ -40,7 +40,7 @@ from video_utils import (
 
 load_dotenv()
 
-# Default to Ukrainian if not set
+# Supported values: ru, uk, en. Keep the original Ukrainian default when unset.
 language = os.getenv("LANGUAGE", "uk").lower()
 # Add backward compatibility for old language setting
 if language == "ua":
@@ -65,6 +65,8 @@ MAX_PROMPT_LEN = 1000
 
 def get_image_caption():
     """Get localized image caption."""
+    if language == "ru":
+        return "Готово — ваше изображение 🖼️"
     if language == "uk":
         return "Ось ваше зображення 🖼️"
     else:
@@ -129,7 +131,8 @@ cleanup_task = None
 def load_responses():
     """Function loading bot responses based on language setting."""
 
-    filename = "responses_uk.json" if language == "uk" else "responses_en.json"
+    filenames = {"ru": "responses_ru.json", "uk": "responses_uk.json", "en": "responses_en.json"}
+    filename = filenames.get(language, "responses_ru.json")
     try:
         with open(filename, "r", encoding="utf-8") as file:
             data = json.load(file)
@@ -138,9 +141,103 @@ def load_responses():
         # Return a minimal set of responses if no response files found
         not_found_responses = {
             "en": "Sorry, I'm having trouble loading my responses right now! 😅",
+            "ru": "Не удалось загрузить ответы бота. Попробуйте ещё раз позже. 😅",
             "uk": "Вибачте, у мене проблеми із завантаженням відповідей! 😅",
         }
-        return not_found_responses[language]
+        return not_found_responses.get(language, not_found_responses["en"])
+
+
+def user_has_access(update: Update) -> bool:
+    """Check configured and persistent allowlists for the current Telegram user."""
+    return not is_user_or_chat_not_allowed(
+        update.effective_user.username,
+        update.effective_chat.id,
+        update.effective_user.id,
+        db_storage.is_allowed_user(update.effective_user.id),
+    )
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint: disable=unused-argument
+    """Show a concise Russian welcome screen and available commands."""
+    if not user_has_access(update):
+        await inform_user_not_allowed(update)
+        return
+    admin_section = (
+        "\n\n<b>Панель администратора</b>\n"
+        "<code>/adduser ID</code> — добавить пользователя\n"
+        "<code>/removeuser ID</code> — удалить пользователя\n"
+        "<code>/whitelist</code> — показать белый список"
+        if is_admin(update.effective_user.id)
+        else ""
+    )
+    await update.message.reply_text(
+        "🎬 <b>Загрузчик видео</b>\n\n"
+        "Отправьте ссылку на TikTok, YouTube, Instagram, X, Reddit или другой поддерживаемый сайт — "
+        "я пришлю медиафайл в ответ.\n\n"
+        "<b>Полезно:</b>\n"
+        "<code>/myid</code> — показать ваш Telegram ID\n"
+        "<code>/help</code> — эта справка"
+        + admin_section,
+        parse_mode="HTML",
+    )
+
+
+async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint: disable=unused-argument
+    """Let anyone retrieve the ID needed for an allowlist request."""
+    await update.message.reply_text(
+        f"🆔 Ваш Telegram ID: <code>{update.effective_user.id}</code>\n\n"
+        "Передайте его администратору, чтобы получить доступ.",
+        parse_mode="HTML",
+    )
+
+
+def command_user_id(context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    """Parse a single positive Telegram ID from a management command."""
+    if len(context.args) != 1:
+        return None
+    try:
+        user_id = int(context.args[0])
+        return user_id if user_id > 0 else None
+    except ValueError:
+        return None
+
+
+async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Allow an administrator to grant access with /adduser <Telegram ID>."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+    user_id = command_user_id(context)
+    if user_id is None:
+        await update.message.reply_text("Использование: <code>/adduser 123456789</code>", parse_mode="HTML")
+        return
+    added = await asyncio.to_thread(db_storage.add_allowed_user, user_id)
+    message = "✅ Пользователь добавлен в белый список." if added else "ℹ️ Этот пользователь уже есть в белом списке."
+    await update.message.reply_text(f"{message}\nID: <code>{user_id}</code>", parse_mode="HTML")
+
+
+async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Allow an administrator to revoke access with /removeuser <Telegram ID>."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+    user_id = command_user_id(context)
+    if user_id is None:
+        await update.message.reply_text("Использование: <code>/removeuser 123456789</code>", parse_mode="HTML")
+        return
+    removed = await asyncio.to_thread(db_storage.remove_allowed_user, user_id)
+    message = "✅ Пользователь удалён из белого списка." if removed else "ℹ️ Этого ID нет в белом списке."
+    await update.message.reply_text(f"{message}\nID: <code>{user_id}</code>", parse_mode="HTML")
+
+
+async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint: disable=unused-argument
+    """Show the persistent allowlist to an administrator."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+    user_ids = await asyncio.to_thread(db_storage.list_allowed_users)
+    body = "\n".join(f"• <code>{user_id}</code>" for user_id in user_ids) or "Список пока пуст."
+    await update.message.reply_text(f"👥 <b>Белый список</b> ({len(user_ids)})\n\n{body}", parse_mode="HTML")
 
 
 responses = load_responses()
@@ -446,7 +543,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
 
     message_text = update.message.text.strip()
     # Check if user is not allowed
-    if is_user_or_chat_not_allowed(update.effective_user.username, update.effective_chat.id):
+    if not user_has_access(update):
         await inform_user_not_allowed(update)
         return
 
@@ -491,11 +588,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
     if not any(site in message_text for site in supported_sites):
         if update.effective_chat.type == "private":
             not_supported_responses = {
+                "ru": "⚠️ Этот сайт пока не поддерживается. Для полной ссылки YouTube попробуйте добавить <code>**</code> перед <code>https://</code>.",
                 "uk": "Цей сайт не підтримується. Спробуйте додати ** перед https://",
                 "en": "This site is not supported. Try adding ** before the https://",
             }
             await update.message.reply_text(
-                not_supported_responses[language],
+                not_supported_responses.get(language, not_supported_responses["en"]),
+                parse_mode="HTML" if language == "ru" else None,
                 reply_to_message_id=update.message.message_id,
             )
             return  # Stop further execution after sending the reply
@@ -508,7 +607,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
     if is_video_too_long_to_download(url):
         debug("Video is too long to process.")
         await update.message.reply_text(
-            "The video is too long to send (over 12 minutes).",
+            "⏱️ Видео слишком длинное: можно отправить файл длительностью до 12 минут."
+            if language == "ru"
+            else "The video is too long to send (over 12 minutes).",
             reply_to_message_id=update.message.message_id,
         )
         return
@@ -538,7 +639,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
                 # do not process if video is too long
                 if is_video_duration_over_limits(pathobj):
                     await update.message.reply_text(
-                        "The video is too long to send (over 12min).",
+                        "⏱️ Видео слишком длинное: можно отправить файл длительностью до 12 минут."
+                        if language == "ru"
+                        else "The video is too long to send (over 12min).",
                         reply_to_message_id=update.message.message_id,
                     )
                     continue  # Drop the video and continue to the next one
@@ -547,7 +650,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
                     compress_video(pathobj)
                     if is_large_file(pathobj):
                         await update.message.reply_text(
-                            "The video is too large to send (over 50MB).",
+                            "📦 Видео слишком большое: после сжатия оно превышает лимит Telegram в 50 МБ."
+                            if language == "ru"
+                            else "The video is too large to send (over 50MB).",
                             reply_to_message_id=update.message.message_id,
                         )
                         continue  # Stop further execution for this video
@@ -1202,6 +1307,12 @@ def main():
         write_timeout=TELEGRAM_WRITE_TIMEOUT,
     )
     application = Application.builder().token(bot_token).request(request).build()
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", start_command))
+    application.add_handler(CommandHandler("myid", myid_command))
+    application.add_handler(CommandHandler("adduser", add_user_command))
+    application.add_handler(CommandHandler("removeuser", remove_user_command))
+    application.add_handler(CommandHandler("whitelist", whitelist_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # This handler will receive every error which happens in your bot
     application.add_error_handler(error_handler)

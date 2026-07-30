@@ -35,6 +35,14 @@ class BotStorage:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_data_last_seen ON user_data(last_seen)")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS allowed_users (
+                user_id INTEGER PRIMARY KEY,
+                added_at REAL NOT NULL
+            )
+            """
+        )
         # Migrate existing tables that don't have image gen columns
         for col, definition in [
             ("img_gen_rate_limit_timestamps", "TEXT"),
@@ -50,6 +58,35 @@ class BotStorage:
                     raise
                 # Column already exists, continue
         self.conn.commit()
+
+    def add_allowed_user(self, user_id: int) -> bool:
+        """Add a Telegram user to the persistent in-bot allowlist."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO allowed_users (user_id, added_at) VALUES (?, ?)",
+            (user_id, time.time()),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def remove_allowed_user(self, user_id: int) -> bool:
+        """Remove a user from the persistent in-bot allowlist."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM allowed_users WHERE user_id = ?", (user_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def is_allowed_user(self, user_id: int) -> bool:
+        """Check whether a user was added through an admin command."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM allowed_users WHERE user_id = ?", (user_id,))
+        return cursor.fetchone() is not None
+
+    def list_allowed_users(self) -> list[int]:
+        """Return all dynamically allowed Telegram IDs."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT user_id FROM allowed_users ORDER BY added_at DESC")
+        return [row[0] for row in cursor.fetchall()]
 
     def load_user_data(self, user_id):
         """Load user data from database."""
