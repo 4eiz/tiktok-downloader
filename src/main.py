@@ -63,6 +63,52 @@ TELEGRAM_WRITE_TIMEOUT = 120
 MAX_PROMPT_LEN = 1000
 
 
+class DownloadProgress:
+    """Render an unobtrusive progress bar by editing one Telegram message."""
+
+    def __init__(self, message, loop: asyncio.AbstractEventLoop):
+        self.message = message
+        self.loop = loop
+        self.last_percent = -1
+        self.last_update = 0.0
+
+    @staticmethod
+    def _text(percent: int) -> str:
+        filled = round(percent / 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        return f"📥 <b>Скачиваю видео</b>\n<code>{bar}</code> <b>{percent}%</b>"
+
+    async def start(self) -> None:
+        await self.message.edit_text(self._text(0), parse_mode="HTML")
+
+    def report(self, percent: float) -> None:
+        """Receive yt-dlp progress from its worker thread without flooding Telegram."""
+        rounded_percent = min(100, max(0, int(percent)))
+        current_time = time.monotonic()
+        if (
+            rounded_percent < 100
+            and rounded_percent - self.last_percent < 5
+            and current_time - self.last_update < 1
+        ):
+            return
+        self.last_percent = rounded_percent
+        self.last_update = current_time
+        self.loop.call_soon_threadsafe(asyncio.create_task, self._update(rounded_percent))
+
+    async def _update(self, percent: int) -> None:
+        try:
+            await self.message.edit_text(self._text(percent), parse_mode="HTML")
+        except TelegramError:
+            # A failed cosmetic update must never interrupt a download.
+            return
+
+    async def set_stage(self, text: str) -> None:
+        try:
+            await self.message.edit_text(text, parse_mode="HTML")
+        except TelegramError:
+            return
+
+
 def get_image_caption():
     """Get localized image caption."""
     if language == "ru":
@@ -615,12 +661,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
         return
     debug("Video is not too long or metadata is not available. Starting download.")
 
+    progress_message = await update.message.reply_text(
+        DownloadProgress._text(0),
+        parse_mode="HTML",
+        reply_to_message_id=update.message.message_id,
+    )
+    download_progress = DownloadProgress(progress_message, asyncio.get_running_loop())
+
     try:
         # media_path can be string or list of strings
         media_path = []  # Initilize empty list of media paths
         video_path = []  # Initilize empty list of video paths
         pic_path = []  # Initilize empty list of picture paths
-        return_path = download_media(url)
+        return_path = await asyncio.to_thread(download_media, url, download_progress.report)
+        await download_progress.set_stage("⚙️ <b>Обрабатываю файл…</b>")
         # Create a list of media paths
         if isinstance(return_path, list):
             media_path.extend(return_path)
@@ -661,6 +715,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
             elif pathobj.endswith((".jpg", ".jpeg", ".png")):
                 pic_path.append(pathobj)
 
+        if not video_path and not pic_path:
+            await download_progress.set_stage("⚠️ <b>Не удалось подготовить файл для отправки.</b>")
+            return
+
         if len(video_path) > 1:
             # Group videos
             video_path = [video_path[i : i + 2] for i in range(0, len(video_path), 2)]
@@ -692,6 +750,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):  #
             # wait 5 seconds before sending the next video if throttle is enabled
             if throttle:
                 await asyncio.sleep(15)
+
+        await download_progress.set_stage("✅ <b>Готово! Видео отправлено.</b>")
 
     finally:
         if media_path:

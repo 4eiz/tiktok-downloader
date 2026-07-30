@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+from typing import Callable, Optional
 from pathlib import Path
 import yt_dlp
 from dotenv import load_dotenv
@@ -267,7 +268,7 @@ def download_instagram_media(url, temp_dir):
     return result_path  # Return the result variable at the end
 
 
-def download_media(url):
+def download_media(url: str, progress_callback: Optional[Callable[[float], None]] = None):
     """
     Downloads a video from the specified URL using yt-dlp and saves it as an MP4 file.
 
@@ -292,7 +293,7 @@ def download_media(url):
     command = [
         "yt-dlp",  # Assuming yt-dlp is installed and in the PATH
         *(["--cookies", "instagram_cookies.txt"] if instagram_cookies else []),
-        "--no-progress",
+        "--newline",
         "-S",
         "vcodec:h264,fps,res,acodec:m4a",
         url,
@@ -305,7 +306,22 @@ def download_media(url):
     result_path = temp_dir  # Initialize the result variable
 
     try:
-        subprocess.run(command, check=True, timeout=120)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for output_line in process.stdout:
+            debug("yt-dlp: %s", output_line.rstrip())
+            progress_match = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", output_line)
+            if progress_match and progress_callback:
+                progress_callback(float(progress_match.group(1)))
+        process.wait(timeout=120)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command)
         for filename in os.listdir(temp_dir):
             if filename.endswith(".mp4"):
                 result_path = os.path.join(temp_dir, filename)
